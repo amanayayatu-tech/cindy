@@ -5,6 +5,7 @@ import { WallpaperSettingsProvider } from '../../../src/renderer/hooks/useWallpa
 import { SUBAGENT_MODEL_SETTINGS_DEFAULTS } from '../../../src/shared/subagentModelSettings';
 import { getDefaultVoiceInputSettings } from '../../../src/shared/voiceInputData';
 import { DEFAULT_APPEARANCE_SETTINGS } from '../../../src/shared/appearanceSettings';
+import type { SelfHostedRelayState } from '../../../src/shared/selfHostedRelay';
 
 const read = <T,>(value: T) => async () => value;
 const state = <T extends object>(defaults: T) => ({ ...defaults, defaults, isCustomized: false, customizedKeys: [] });
@@ -13,9 +14,11 @@ Object.assign(window, { settingsFixtureEntries: SETTINGS_SEARCH_ENTRIES });
 const zeroMoney = { amount: 0, currency: 'USD', approximate: false, kind: 'actual-cost' };
 const creditPool = { remaining: '0', used: '0', total: '0' };
 if (ctx.data.tab === 'agent-island') localStorage.setItem('notifications.agentIslandEnabled', 'true');
-const relayState = {
-  available: true, mode: 'official', relay: null, issue: null,
-  host: { enabled: false, running: false, error: null, port: 47820, listenAll: false, externalUrl: null, suggestedUrls: [] },
+const relayAddress = 'http://127.0.0.1:47820';
+const relayState: SelfHostedRelayState = {
+  available: true, mode: ctx.data.highZoom ? 'self-hosted' : 'official', issue: null,
+  relay: ctx.data.highZoom ? { name: 'Preview relay', baseUrl: relayAddress, role: 'owner', origin: 'host' } : null,
+  host: { enabled: Boolean(ctx.data.highZoom), running: Boolean(ctx.data.highZoom), error: null, port: 47820, listenAll: false, externalUrl: null, suggestedUrls: [relayAddress] },
   deployments: [], deployJob: null, bundledRelayVersion: '0.3.1', joinLink: null, pendingRequests: [], join: { status: 'idle' },
 };
 const analyticsState = {
@@ -96,7 +99,18 @@ void mountPage({
     remoteDesktop: { state: read({ enabled: false }) },
     remoteSsh: { list: read({ hosts: [] }), onStatusChanged: subscription('ssh') },
     sidebarSettings: { loadSnapshot: () => ({ hiddenMainViewGhostIds: [], dataOwnerId: null, ownerGeneration: 0 }), onHiddenMainViewGhostIdsChanged: subscription('sidebar') },
-    selfHostedRelay: { command: read({ state: relayState }), getState: read(relayState), onChanged: subscription('relay') },
+    selfHostedRelay: {
+      command: async (command: { type: string }) => {
+        if (!ctx.data.highZoom || command.type === 'state' || command.type === 'refresh-account-relays') return { state: relayState };
+        if (command.type !== 'create-join-link') return forbid('selfHostedRelay.command')();
+        return { state: { ...relayState, joinLink: {
+          link: 'cindy://relay/join?demo=settings-zoom',
+          expiresAt: new Date(Date.now() + 300_000).toISOString(),
+          otherAccounts: true,
+        } } };
+      },
+      getState: read(relayState), onChanged: subscription('relay'),
+    },
     localAgent: { connections: read([]), developerConnection: read({ state: 'stopped' }), onConnectionsChanged: subscription('local-agent') },
     terminal: { listAvailableShells: read([]), getDefaultShellPref: read('auto') },
     worktreeRecycle: { list: read([]) },

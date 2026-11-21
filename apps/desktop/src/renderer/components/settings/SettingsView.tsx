@@ -19,11 +19,12 @@ import { imBotSettings } from './ImBotSection.settings-search';
 import { helpSettings } from './HelpSection.settings-search';
 import { aboutSettings } from './AboutSection.settings-search';
 import { storageManagementCardSettings } from './StorageManagementCard.settings-search';
-import { lazy, Suspense, useTransition, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { lazy, Suspense, useTransition, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Navigate, useNavigate, useOutletContext, useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useSyncExternalStore } from 'react';
-import { ArrowLeft } from 'lucide-react';
+import { ArrowLeft, ChevronDown } from 'lucide-react';
+import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { Tip } from '@/components/ui/tooltip';
 import { TAB_IDS, isSettingsTab } from '@/lib/tabLabels';
@@ -104,6 +105,7 @@ const PluginSettingsFields = lazy(() => import('./PluginSettingsSection').then(m
 const PluginUiView = lazy(() => import('@/cindy-brain/PluginUiView').then(module => ({ default: module.PluginUiView })));
 
 const DEFAULT_SETTINGS_MENU_WIDTH = 260;
+const MIN_SETTINGS_CONTENT_WIDTH = 400;
 
 const subscribeVoiceSettings = (onChange: () => void) => window.electronAPI.voiceInput.onDataChanged(onChange);
 const getVoiceRefinementEnabled = () => getVoiceInputSettings().refinementEnabled;
@@ -164,6 +166,7 @@ function SettingsViewContent() {
   );
   const rawTab = searchParams.get('tab');
   const rawSection = searchParams.get('section');
+  const requestedQuery = searchParams.get('query') ?? '';
   const pluginSettings = outletContext?.pluginSettings ?? NO_PLUGIN_SETTINGS;
   const pluginPages = useMemo(() => buildPluginSettingsPages(pluginSettings), [pluginSettings]);
   const pluginSearchDocuments = useMemo(() => buildPluginSettingsSearchDocuments(pluginPages, t('pluginUi.settings')), [pluginPages, t]);
@@ -319,12 +322,39 @@ function SettingsViewContent() {
   // 设置是主窗口里的路由，Esc 与左上角返回按钮走同一出口，不关窗。
   const exitSettings = useCallback(() => navigate('/'), [navigate]);
   const settingsRootRef = useRef<HTMLDivElement | null>(null);
+  const compactMenuButtonRef = useRef<HTMLButtonElement | null>(null);
+  const [compact, setCompact] = useState(false);
+  const [compactMenuOpen, setCompactMenuOpen] = useState(false);
+  const showingCompactMenu = compact && compactMenuOpen;
+  useLayoutEffect(() => {
+    const root = settingsRootRef.current;
+    if (!root) return;
+    const updateLayout = () => {
+      const width = root.clientWidth;
+      if (width > 0) setCompact(width < menuWidth + MIN_SETTINGS_CONTENT_WIDTH);
+    };
+    updateLayout();
+    if (typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(updateLayout);
+    observer.observe(root);
+    return () => observer.disconnect();
+  }, [menuWidth, shouldRedirectLegacyPluginTabs]);
+  useLayoutEffect(() => {
+    setCompactMenuOpen(compact && Boolean(requestedQuery));
+  }, [compact, requestedQuery]);
 
-  // Esc 逐层返回：PI 扩展子页先回到「通用」，其余退出设置；帮助面板开着时归它。
+  const closeCompactMenu = useCallback(() => {
+    if (!showingCompactMenu) return;
+    setCompactMenuOpen(false);
+    compactMenuButtonRef.current?.focus({ preventScroll: true });
+  }, [showingCompactMenu]);
+
+  // Esc 逐层返回：先关窄窗目录，再关 PI 扩展子页或退出设置；帮助面板开着时归它。
   const handleSettingsEscape = useCallback(() => {
-    if (piExtensionsPanelOpen) handleClosePiExtensions();
+    if (showingCompactMenu) closeCompactMenu();
+    else if (piExtensionsPanelOpen) handleClosePiExtensions();
     else exitSettings();
-  }, [exitSettings, handleClosePiExtensions, piExtensionsPanelOpen]);
+  }, [closeCompactMenu, exitSettings, handleClosePiExtensions, piExtensionsPanelOpen, showingCompactMenu]);
   useSettingsEscape(settingsRootRef, !helpAssistantOpen, handleSettingsEscape);
 
   useEffect(() => {
@@ -396,15 +426,19 @@ function SettingsViewContent() {
     >
       {/* Outer container — page itself does not scroll; columns own their scroll behavior.
           左侧保留原来的页头位置；右侧不再为页头预留 56px，贴着 46px 标题栏起排。 */}
-      <div className="flex h-full min-h-0 w-full justify-start pb-5">
+      <div className={cn('flex h-full min-h-0 w-full', compact ? 'flex-col' : 'pb-5')}>
         {/* Inner sidebar mirrors the main sidebar width for a stable route transition. */}
         <aside
-          className="flex h-full min-h-0 shrink-0 flex-col gap-2 overflow-y-auto pl-6 pr-4 pt-7"
-          style={{ width: menuWidth }}
+          className={cn(
+            'flex min-h-0 shrink-0 flex-col',
+            compact ? 'w-full' : 'h-full gap-2 overflow-y-auto pl-6 pr-4 pt-7',
+            showingCompactMenu && 'flex-1',
+          )}
+          style={compact ? undefined : { width: menuWidth }}
           aria-label={t('settings.title')}
         >
           {/* Back navigation — gap 10, pb 18, aligned with menu items via px-3 */}
-          <div className="flex items-center gap-2.5 px-3 pb-[18px]">
+          <div className={cn('flex items-center gap-2.5', compact ? 'shrink-0 px-3 py-1.5' : 'px-3 pb-[18px]')}>
             <Tip text={t('settings.back')} side="bottom">
               <button data-settings-search-action="Return from settings or close the extensions subpage"
                 type="button"
@@ -416,22 +450,52 @@ function SettingsViewContent() {
               </button>
             </Tip>
             <h1 className="text-24 font-medium leading-[1.1] text-[var(--settings-back-text)]">
-              {t('settings.title')}
+              {compact ? (
+                <Button
+                  ref={compactMenuButtonRef}
+                  variant="secondary"
+                  size="md"
+                  aria-expanded={showingCompactMenu}
+                  aria-controls="settings-category-navigation"
+                  onClick={() => setCompactMenuOpen(open => !open)}
+                >
+                  {t('settings.title')}
+                  <ChevronDown size={14} aria-hidden="true" className={cn(showingCompactMenu && 'rotate-180')} />
+                </Button>
+              ) : t('settings.title')}
             </h1>
           </div>
 
-          <SettingsSidebarNav
-            requestedQuery={searchParams.get('query') ?? ''}
-            tabIds={visibleTabIds}
-            searchContext={searchContext}
-            activeTab={activeTab}
-            onSelectTab={handleSelectTab}
-            onSelectSearchResult={handleSelectSearchResult}
-            pluginPages={pluginPages}
-            pluginSearchDocuments={pluginSearchDocuments}
-            selectedPluginPage={selectedPluginPage?.id}
-            onSelectPluginPage={selectPluginPage}
-          />
+          <div
+            id="settings-category-navigation"
+            className={cn(
+              'flex-col gap-2',
+              compact && 'min-h-0 overflow-y-auto px-3 pt-2',
+              compact && !showingCompactMenu ? 'hidden' : 'flex',
+            )}
+          >
+            <SettingsSidebarNav
+              requestedQuery={requestedQuery}
+              tabIds={visibleTabIds}
+              searchContext={searchContext}
+              activeTab={activeTab}
+              onSelectTab={(tab) => {
+                closeCompactMenu();
+                handleSelectTab(tab);
+              }}
+              onSelectSearchResult={(result) => {
+                closeCompactMenu();
+                handleSelectSearchResult(result);
+              }}
+              pluginPages={pluginPages}
+              pluginSearchDocuments={pluginSearchDocuments}
+              selectedPluginPage={selectedPluginPage?.id}
+              onSelectPluginPage={(page) => {
+                closeCompactMenu();
+                selectPluginPage(page);
+              }}
+            />
+          </div>
         </aside>
 
         {/* Content column — capped and centered in the remaining space.
@@ -444,7 +508,9 @@ function SettingsViewContent() {
         <div
           ref={contentScrollRef}
           className={cn(
-            'flex h-full min-h-0 min-w-0 flex-1 flex-col pl-4 pr-6 [scrollbar-gutter:stable]',
+            'h-full min-h-0 min-w-0 flex-1 flex-col [scrollbar-gutter:stable]',
+            showingCompactMenu ? 'hidden' : 'flex',
+            compact ? 'px-2' : 'pl-4 pr-6',
             // providers 与 import / ghosts 同属「内部自己滚」:模型列表要贴着窗口底,
             // 外层再滚一层会让卡片高度只能靠猜(原先卡片写 calc(100vh-14rem),
             // 扣除量与真实 chrome 不符时下方就空出一条 —— 正是 pb-32 那 128px)。

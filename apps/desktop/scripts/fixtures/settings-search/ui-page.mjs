@@ -36,6 +36,16 @@ export default {
     'personalization-custom': { about: 'Custom auxiliary slots forward search IDs to real model selector buttons', data: { tab: 'personalization', customAuxiliary: true } },
     'worktree-model-naming': { about: 'Model naming defaults off, can be found in search, and clears its override on reset', data: { tab: 'personalization', worktreeModelNaming: true } },
     'tab-switch': { about: 'Committed settings tabs paint at full opacity with normal motion enabled', data: { tab: 'personalization', tabSwitch: true } },
+    'high-interface-zoom': {
+      about: 'At the minimum window size and 300% zoom, Settings has room for its content, category navigation and search',
+      data: { tab: 'remote-control', cloud: true, highZoom: true },
+      viewport: { width: 267, height: 200 },
+    },
+    'high-interface-zoom-200': {
+      about: 'At the minimum window size and 200% zoom, Settings gives its content the full width',
+      data: { tab: 'remote-control', cloud: true, highZoom: true },
+      viewport: { width: 400, height: 300 },
+    },
     'remote-signed-in': { about: 'Signed-in device controls and relay section with searchable targets', data: { tab: 'remote-control', cloud: true } },
     ...Object.fromEntries([
     'general', 'appearance', 'personalization', 'voice-input', 'shortcuts',
@@ -44,8 +54,76 @@ export default {
   },
   async check(page, ui) {
     const panel = page.getByRole('tabpanel');
-    await panel.waitFor();
+    await panel.waitFor({ state: ui.data.highZoom ? 'attached' : 'visible' });
     assert.equal(await panel.getAttribute('id'), `settings-panel-${ui.data.tab}`);
+    // #8380 browser layout regression: at 800×600 with 300% zoom the
+    // production Settings route gets about 267×200 CSS pixels. Other cases
+    // check the full-size side-by-side menu and cannot detect a squeezed panel.
+    if (ui.data.highZoom) {
+      const viewportWidth = await page.evaluate(() => innerWidth);
+      const panelWidth = await panel.evaluate(el => el.getBoundingClientRect().width);
+      assert.ok(panelWidth >= viewportWidth - 40, `Settings panel has only ${panelWidth}px of ${viewportWidth}px`);
+      await ui.capture('full-width-panel');
+      const title = await ui.t('settings.title');
+      const menu = page.getByRole('button', { name: title, exact: true });
+      const tabs = page.getByRole('tablist', { name: title });
+      const search = page.getByRole('combobox', { name: await ui.t('settings.search.ariaLabel') });
+
+      await menu.press('Enter');
+      await tabs.waitFor();
+      assert.equal(await panel.isVisible(), false);
+      await ui.capture('settings-categories');
+      await page.getByRole('tab', { name: await ui.t('settings.tabs.general'), exact: true }).press('Enter');
+      await page.locator('#settings-panel-general').waitFor();
+      assert.equal(await menu.getAttribute('aria-expanded'), 'false');
+      assert.equal(await menu.evaluate(el => el === document.activeElement), true);
+
+      const language = panel.getByRole('combobox', { name: await ui.t('settings.language.ariaLabel'), exact: true });
+      await language.click();
+      const languageOptions = page.getByRole('listbox');
+      await languageOptions.waitFor();
+      assert.ok(await languageOptions.getByRole('option').count() > 1);
+      await ui.capture('language-options');
+      await page.keyboard.press('Escape');
+      await languageOptions.waitFor({ state: 'hidden' });
+
+      await menu.click();
+      await search.fill('relay');
+      await search.press('Enter');
+      await page.waitForFunction(() => document.getElementById('settings-search-target-remote-relay')
+        ?.classList.contains('settings-search-target-highlight'));
+      assert.equal(await panel.getAttribute('id'), 'settings-panel-remote-control');
+      const relay = panel.locator('#settings-search-target-remote-relay');
+      const share = relay.getByRole('button', { name: await ui.t('settings.remoteControl.relay.share.action'), exact: true });
+      await share.scrollIntoViewIfNeeded();
+      await ui.capture('relay-action');
+      await share.click();
+      const dialog = page.getByTestId('relay-share-dialog');
+      const qr = dialog.getByRole('img', { name: await ui.t('settings.remoteControl.relay.share.qrAlt'), exact: true });
+      await qr.scrollIntoViewIfNeeded();
+      const usableQr = await qr.evaluate(async (image) => {
+        await image.decode();
+        image.scrollIntoView({ block: 'center', behavior: 'instant' });
+        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        const bounds = image.getBoundingClientRect();
+        const frame = image.closest('[role="dialog"]').getBoundingClientRect();
+        return bounds.left >= frame.left && bounds.right <= frame.right &&
+          bounds.top >= frame.top && bounds.bottom <= frame.bottom;
+      });
+      assert.ok(usableQr, 'the generated QR fits inside the visible share dialog');
+      await ui.capture('relay-share');
+      await dialog.getByRole('button', { name: await ui.t('settings.remoteControl.relay.share.done'), exact: true }).click();
+      await dialog.waitFor({ state: 'hidden' });
+
+      await menu.click();
+      await search.focus();
+      await page.keyboard.press('Escape');
+      assert.equal(await menu.getAttribute('aria-expanded'), 'true');
+      await page.keyboard.press('Escape');
+      assert.equal(await menu.getAttribute('aria-expanded'), 'false');
+      assert.equal(await menu.evaluate(el => el === document.activeElement), true);
+      return;
+    }
     // Product regression: the opt-in must remain off until selected. Exercise the
     // real setting, search and local override; existing cases only read controls.
     if (ui.data.modelTokens) {

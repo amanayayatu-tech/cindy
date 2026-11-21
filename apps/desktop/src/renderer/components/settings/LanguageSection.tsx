@@ -47,6 +47,7 @@ export function LanguageSection() {
       <SettingsCard>
         <SettingsRow
           id={languageSettings.language.targetId}
+          wrap
           title={t(languageSettings.language.titleKey)}
           hint={t(languageSettings.language.descriptionKey)}
           trailing={
