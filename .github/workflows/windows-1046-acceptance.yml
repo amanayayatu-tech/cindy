@@ -1,0 +1,45 @@
+name: Windows x64 shell acceptance
+on:
+  push:
+    branches:
+      - acceptance/windows-1046
+permissions:
+  contents: read
+jobs:
+  shell-acceptance:
+    if: github.repository == 'amanayayatu-tech/cindy'
+    runs-on: windows-2025
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      XDT_SKIP_AGENT_BIN_INSTALL: '1'
+      ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+      NODE_OPTIONS: '--max-old-space-size=8192'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          lfs: true
+          persist-credentials: false
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86
+        with:
+          run_install: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 22
+      - name: Record Windows and PowerShell versions
+        run: |
+          node -p 'process.platform + " " + process.arch'
+          pwsh.exe -NoProfile -NonInteractive -Version
+          & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -Command '$PSVersionTable.PSVersion.ToString()'
+      - name: Install pinned dependencies and native Codex
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          pnpm install --frozen-lockfile
+          pnpm install:codex
+          pnpm install:ripgrep
+      - name: Run PowerShell controls and Cindy native shell probe
+        run: |
+          $env:CINDY_CODEX_TEST_BINARY = (Resolve-Path 'apps/codex-package-bin/win32-x64/bin/codex.exe').Path
+          node --import tsx --import ./apps/host/src/loaders/register-raw.mjs ./codex-shell-probe.mjs
