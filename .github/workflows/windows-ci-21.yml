@@ -1,4 +1,4 @@
-name: Windows CI diagnostic (21 PRs)
+name: Windows CI follow-up (remaining signatures)
 on:
   push:
     branches:
@@ -14,15 +14,103 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {pr: '12774', kind: pr, shard: 3, sha: 5f4022f2f020b35432b60cef48326319c26caadc}
-          - {pr: '12349', kind: pr, shard: 4, sha: 49015910c7c6a9bb62ea93d139448c88f5eceff5}
-          - {pr: '12336', kind: pr, shard: 2, sha: 5bee12d264819d3c732bda08c6de0d7c2cfb949b}
-          - {pr: '12337', kind: pr, shard: 8, sha: 9d1c2918f12245aaef31934fa8b43c3f0a0ed59c}
-          - {pr: '12337', kind: base, shard: 8, sha: 9bd8ad596517463acef59a3448ea0cc692fae8ae}
-          - {pr: '12371', kind: pr, shard: 6, sha: ec1e9fad7b37663edab840e915b3ff21707addae}
-          - {pr: '12371', kind: base, shard: 6, sha: e05048ac940257c26300cbbd0577c05e1d2dc125}
-          - {pr: '12480', kind: pr, shard: 8, sha: 5669e9b1e103381102d03191773078e410e2ab4d}
-          - {pr: '12480', kind: base, shard: 8, sha: a9927110b64f9441450917ec90efb6cd91118ce7}
+          - {pr: '11740', kind: earlier-pr, shard: 7, sha: 3b4f7af067d39aa55f10827bc5f3f8121ae2c4f0}
+          - {pr: '11740', kind: earlier-base, shard: 7, sha: cb2cc1b32d6f7a9257fa5cffdeedc8ae9524cd06}
+    env:
+      XDT_SKIP_AGENT_BIN_INSTALL: '1'
+      ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+      ELECTRON_OVERRIDE_DIST_PATH: '${{ github.workspace }}/.electron-stub-dist'
+      # 8192: desktop tsc 全量 typecheck 峰值内存随仓体增长已突破 4GB(2026-08-02 起
+      # 所有 PR 的 verify 在 Typecheck desktop 步骤稳定 OOM,含纯 mobile 改动);
+      # 公开仓 ubuntu-latest runner 内存 16GB,8GB heap 安全。
+      NODE_OPTIONS: '--max-old-space-size=8192'
+      XDT_UNIT_TEST_SHARD: ${{ matrix.shard }}/8
+
+    steps:
+      - name: Checkout client
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        # Unit shards only read the working tree; full history and every remote
+        # branch cost ~0.5 min per shard (verify, runner and Git jobs keep depth 0).
+        with:
+          repository: makecindy/cindy
+          ref: ${{ matrix.sha }}
+          persist-credentials: false
+          lfs: true
+
+      # 托管 Windows runner 的工作区在 D 盘，TEMP 默认在 C 盘，而 C 盘 IO 明显更慢。
+      # Desktop 单测有 700 多个文件创建临时目录(electron stub 的 userData 也在 TEMP
+      # 下)，所以把 TEMP/TMP 放到工作区所在盘，只影响本 job 后续步骤。不能用
+      # RUNNER_TEMP(D:\a\_temp)：路径写进 Markdown 链接后 `\_` 会被当成转义，回复附件
+      # 测试因此找不到文件。目录名的每一段都不要以 ASCII 标点开头。
+      - name: Record checkout, lockfile, and architecture
+        shell: pwsh
+        run: |
+          git log -1 --format='%H %P'
+          Get-FileHash pnpm-lock.yaml
+          Write-Output "Runner architecture: $env:RUNNER_ARCH"
+
+      - name: Keep temp files on the workspace drive
+        shell: pwsh
+        run: |
+          $temp = Join-Path (Split-Path -Qualifier $env:GITHUB_WORKSPACE) 'cindy-tmp'
+          New-Item -ItemType Directory -Force -Path $temp | Out-Null
+          "TEMP=$temp" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "TMP=$temp" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "TEMP: $env:TEMP -> $temp"
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+        with:
+          run_install: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # 缓存 bundled ripgrep：各分片都要装，GitHub Releases 偶发 504 时会整批变红。
+      # 命中后 install:ripgrep 按 .version 标记直接跳过下载。
+      - name: Cache bundled ripgrep
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: apps/ripgrep-bin
+          key: ripgrep-bin-${{ runner.os }}-${{ hashFiles('tools/ripgrep/latest.json') }}
+
+      - name: Install bundled ripgrep
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: pnpm install:ripgrep
+
+      - name: Run client and package unit tests
+        # 通过 package script 传递
+        # npm_execpath，避免 Windows 子进程退回 PATH 上的 pnpm.cmd。
+        # XDT_VITEST_FILE_TIMINGS 让 Desktop 额外写出每个测试文件的耗时，供按耗时分片。
+        env:
+          XDT_VITEST_FILE_TIMINGS: ${{ runner.temp }}/vitest-file-timings/desktop-windows-shard-${{ matrix.shard }}.json
+        run: pnpm run test:workspaces --tier unit
+
+      - name: Upload Desktop file timings
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: desktop-timings-${{ matrix.pr }}-${{ matrix.kind }}-shard-${{ matrix.shard }}
+          path: ${{ runner.temp }}/vitest-file-timings/
+          if-no-files-found: ignore
+          retention-days: 14
+  windows-2:
+    name: "PR ${{ matrix.pr }} ${{ matrix.kind }} / Windows shard ${{ matrix.shard }}/8"
+    runs-on: windows-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {pr: '12324', kind: pr, shard: 3, sha: 7acbd0d98fcc67d2ee5c74f126fecf8874e1e5c4}
     env:
       XDT_SKIP_AGENT_BIN_INSTALL: '1'
       ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
@@ -92,107 +180,6 @@ jobs:
           name: pnpm-install-${{ matrix.pr }}-${{ matrix.kind }}-shard-${{ matrix.shard }}-attempt-${{ github.run_attempt }}
           path: ${{ runner.temp }}/pnpm-install.json
           retention-days: 7
-
-      # 缓存 bundled ripgrep：各分片都要装，GitHub Releases 偶发 504 时会整批变红。
-      # 命中后 install:ripgrep 按 .version 标记直接跳过下载。
-      - name: Cache bundled ripgrep
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: apps/ripgrep-bin
-          key: ripgrep-bin-${{ runner.os }}-${{ hashFiles('tools/ripgrep/latest.json') }}
-
-      - name: Install bundled ripgrep
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: pnpm install:ripgrep
-
-      - name: Run client and package unit tests
-        # 通过 package script 传递
-        # npm_execpath，避免 Windows 子进程退回 PATH 上的 pnpm.cmd。
-        # XDT_VITEST_FILE_TIMINGS 让 Desktop 额外写出每个测试文件的耗时，供按耗时分片。
-        env:
-          XDT_VITEST_FILE_TIMINGS: ${{ runner.temp }}/vitest-file-timings/desktop-windows-shard-${{ matrix.shard }}.json
-        run: pnpm run test:workspaces --tier unit
-
-      - name: Upload Desktop file timings
-        if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: desktop-timings-${{ matrix.pr }}-${{ matrix.kind }}-shard-${{ matrix.shard }}
-          path: ${{ runner.temp }}/vitest-file-timings/
-          if-no-files-found: ignore
-          retention-days: 14
-  windows-2:
-    name: "PR ${{ matrix.pr }} ${{ matrix.kind }} / Windows shard ${{ matrix.shard }}/8"
-    runs-on: windows-latest
-    timeout-minutes: 40
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - {pr: '11914', kind: pr, shard: 3, sha: 040713e73fd5118aff7f0a39e0439cef3725baff}
-          - {pr: '11789', kind: pr, shard: 1, sha: 5ff7646674bab2d2976b3e496f82f32a3efddba0}
-          - {pr: '11789', kind: base, shard: 1, sha: cdb77da96ebeee03b16087b53a4a77c1fc04a788}
-          - {pr: '11801', kind: pr, shard: 2, sha: cc9c89b7bdbd5d7af587725883c71b01f927f0cb}
-          - {pr: '11801', kind: base, shard: 2, sha: a42cca1840c624a83697755ab61165c1b364b767}
-          - {pr: '11814', kind: pr, shard: 8, sha: 08642708e6b1009c6d82ec7b5e7a8b0dda4379bf}
-          - {pr: '11814', kind: base, shard: 8, sha: df4aaac4b74ccece0d0eba3899de4271c925e33a}
-    env:
-      XDT_SKIP_AGENT_BIN_INSTALL: '1'
-      ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
-      ELECTRON_OVERRIDE_DIST_PATH: '${{ github.workspace }}/.electron-stub-dist'
-      # 8192: desktop tsc 全量 typecheck 峰值内存随仓体增长已突破 4GB(2026-08-02 起
-      # 所有 PR 的 verify 在 Typecheck desktop 步骤稳定 OOM,含纯 mobile 改动);
-      # 公开仓 ubuntu-latest runner 内存 16GB,8GB heap 安全。
-      NODE_OPTIONS: '--max-old-space-size=8192'
-      XDT_UNIT_TEST_SHARD: ${{ matrix.shard }}/8
-
-    steps:
-      - name: Checkout client
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        # Unit shards only read the working tree; full history and every remote
-        # branch cost ~0.5 min per shard (verify, runner and Git jobs keep depth 0).
-        with:
-          repository: makecindy/cindy
-          ref: ${{ matrix.sha }}
-          persist-credentials: false
-          lfs: true
-
-      # 托管 Windows runner 的工作区在 D 盘，TEMP 默认在 C 盘，而 C 盘 IO 明显更慢。
-      # Desktop 单测有 700 多个文件创建临时目录(electron stub 的 userData 也在 TEMP
-      # 下)，所以把 TEMP/TMP 放到工作区所在盘，只影响本 job 后续步骤。不能用
-      # RUNNER_TEMP(D:\a\_temp)：路径写进 Markdown 链接后 `\_` 会被当成转义，回复附件
-      # 测试因此找不到文件。目录名的每一段都不要以 ASCII 标点开头。
-      - name: Record checkout, lockfile, and architecture
-        shell: pwsh
-        run: |
-          git log -1 --format='%H %P'
-          Get-FileHash pnpm-lock.yaml
-          Write-Output "Runner architecture: $env:RUNNER_ARCH"
-
-      - name: Keep temp files on the workspace drive
-        shell: pwsh
-        run: |
-          $temp = Join-Path (Split-Path -Qualifier $env:GITHUB_WORKSPACE) 'cindy-tmp'
-          New-Item -ItemType Directory -Force -Path $temp | Out-Null
-          "TEMP=$temp" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "TMP=$temp" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "TEMP: $env:TEMP -> $temp"
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
-        with:
-          run_install: false
-
-      - name: Setup Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: 22
-          cache: pnpm
-          cache-dependency-path: pnpm-lock.yaml
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
 
       # 缓存 bundled ripgrep：各分片都要装，GitHub Releases 偶发 504 时会整批变红。
       # 命中后 install:ripgrep 按 .version 标记直接跳过下载。
